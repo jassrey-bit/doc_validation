@@ -1,0 +1,17 @@
+# Entorno virtual
+venv/
+__pycache__/
+*.pyc
+
+# Secretos
+.env
+
+# Cache de pytest
+.pytest_cache/
+
+# Artefactos generados en tiempo de ejecución
+reports/report.html
+temp_images/
+
+# Documentos de prueba con datos reales/sensibles (no publicar)
+documents/
