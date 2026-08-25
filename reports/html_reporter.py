@@ -1,31 +1,29 @@
-from datetime import datetime
+from pathlib import Path
+
+from core.models import ComparisonResult
+
 
 class HtmlReporter:
 
     def generate_report(
         self,
-        differences,
-        summary,
-        analysis
+        result: ComparisonResult,
+        output_path: str | Path = "reports/report.html",
     ):
-
-        current_date = datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
 
         rows = ""
 
-        for diff in differences:
+        for d in result.semantic.discrepancies:
 
-            severity = diff["severity"]
-
+            severity = d.severity.value if d.severity else "SIN CLASIFICAR"
             color = self.get_color(severity)
 
             rows += f"""
             <tr>
-                <td>{diff['field']}</td>
-                <td>{diff['expected']}</td>
-                <td>{diff['actual']}</td>
+                <td>{d.location}</td>
+                <td>{d.change_type.value}</td>
+                <td>{d.expected_text}</td>
+                <td>{d.actual_text}</td>
                 <td style="
                     color:{color};
                     font-weight:bold;
@@ -35,6 +33,30 @@ class HtmlReporter:
             </tr>
             """
 
+        structural_section = f"""
+
+        <div
+            style="
+                background:#f4f4f4;
+                padding:15px;
+                border-radius:10px;
+                margin-top:20px;
+                margin-bottom:20px;
+            "
+        >
+
+            <h3>Estructura del Documento</h3>
+
+            <ul>
+                <li>Método de descubrimiento: <b>{result.structural.discovery_method.value}</b></li>
+                <li>Puntuación estructural: <b>{result.structural.score}%</b></li>
+                <li>Secciones esperadas: <b>{len(result.structural.expected_sections)}</b></li>
+                <li>Secciones faltantes: <b>{result.structural.missing_sections or "Ninguna"}</b></li>
+            </ul>
+
+        </div>
+        """
+
         summary_section = f"""
 
         <h2>
@@ -42,12 +64,12 @@ class HtmlReporter:
             <span style="
                 color:
                 {'red'
-                if summary['status'] == 'FAILED'
+                if result.summary.status == 'FAILED'
                 else 'green'};
 
                 font-weight:bold;
             ">
-                {summary['status']}
+                {result.summary.status}
             </span>
         </h2>
 
@@ -68,28 +90,28 @@ class HtmlReporter:
                 <li>
                     Total Diferencias:
                     <b>
-                        {summary['total_differences']}
+                        {result.summary.total_discrepancies}
                     </b>
                 </li>
 
                 <li>
                     Criticos:
                     <b>
-                        {summary['critical']}
+                        {result.summary.critical}
                     </b>
                 </li>
 
                 <li>
                     Avisos:
                     <b>
-                        {summary['warning']}
+                        {result.summary.warning}
                     </b>
                 </li>
 
                 <li>
                     Informativos:
                     <b>
-                        {summary['info']}
+                        {result.summary.info}
                     </b>
                 </li>
 
@@ -98,33 +120,59 @@ class HtmlReporter:
         </div>
         """
 
-        ai_section = f"""
+        if result.visual is None:
+            visual_section = ""
+        elif result.visual.available:
+            visual_section = f"""
 
-        <div
-            style="
-                margin-top:30px;
-                padding:20px;
-                background:#f8f9fa;
-                border-left:6px solid #007bff;
-                border-radius:10px;
-            "
-        >
-
-            <h2>
-                Analisis IA
-            </h2>
-
-            <pre
+            <div
                 style="
-                    white-space: pre-wrap;
-                    font-family: Arial;
+                    margin-top:30px;
+                    padding:20px;
+                    background:#f8f9fa;
+                    border-left:6px solid #007bff;
+                    border-radius:10px;
                 "
             >
-{analysis}
-            </pre>
 
-        </div>
-        """
+                <h2>
+                    Análisis Visual (IA)
+                </h2>
+
+                <pre
+                    style="
+                        white-space: pre-wrap;
+                        font-family: Arial;
+                    "
+                >
+{result.visual.findings}
+                </pre>
+
+            </div>
+            """
+        else:
+            visual_section = f"""
+
+            <div
+                style="
+                    margin-top:30px;
+                    padding:20px;
+                    background:#fff3cd;
+                    border-left:6px solid #ffc107;
+                    border-radius:10px;
+                "
+            >
+
+                <h2>
+                    Análisis Visual (IA)
+                </h2>
+
+                <p>
+                    No disponible: {result.visual.error}
+                </p>
+
+            </div>
+            """
 
         html = f"""
         <html>
@@ -173,19 +221,24 @@ class HtmlReporter:
 
             <p>
                 Generado durante:
-                {current_date}
+                {result.summary.generated_at.strftime("%Y-%m-%d %H:%M:%S")}
+            </p>
+
+            <p>
+                {result.expected_path} (esperado) vs. {result.actual_path} (actual)
             </p>
 
             {summary_section}
 
-            
+            {structural_section}
 
             <table>
 
                 <thead>
 
                     <tr>
-                        <th>Campo/Mencion</th>
+                        <th>Ubicación</th>
+                        <th>Tipo</th>
                         <th>Esperado</th>
                         <th>Actual</th>
                         <th>Severidad</th>
@@ -200,20 +253,18 @@ class HtmlReporter:
                 </tbody>
 
             </table>
-            
-            {ai_section}
+
+            {visual_section}
 
         </body>
 
         </html>
         """
 
-        with open(
-            "reports/report.html",
-            "w",
-            encoding="utf-8"
-        ) as file:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
+        with open(output_path, "w", encoding="utf-8") as file:
             file.write(html)
 
     def get_color(self, severity):

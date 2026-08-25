@@ -1,31 +1,55 @@
+from core.models import ComparisonResult
+
+
 class ConsoleReporter:
 
-    def print_report(self, differences):
+    def print_report(self, result: ComparisonResult):
+
+        print("\n")
+        print("=" * 50)
+        print("ESTRUCTURA DEL DOCUMENTO")
+        print("=" * 50)
+        print(f"Método de descubrimiento: {result.structural.discovery_method.value}")
+        print(f"Puntuación estructural: {result.structural.score}%")
+        if result.structural.missing_sections:
+            print(f"Secciones faltantes: {result.structural.missing_sections}")
 
         print("\n")
         print("=" * 50)
         print("DIFERENCIAS ENCONTRADAS")
         print("=" * 50)
 
-        if not differences:
-
+        if not result.semantic.discrepancies:
             print("\nNo se encontraron diferencias.\n")
-            return
+        else:
+            for d in result.semantic.discrepancies:
+                print(f"\nUbicación: {d.location}")
+                print(f"Tipo: {d.change_type.value}")
+                print(f"Esperado: {d.expected_text}")
+                print(f"Actual: {d.actual_text}")
+                print(f"Severidad: {d.severity.value if d.severity else 'SIN CLASIFICAR'}")
+                if d.severity_reasoning:
+                    print(f"Razón: {d.severity_reasoning}")
+                print("-" * 50)
 
-        for difference in differences:
+        if result.visual is not None:
+            print("\n")
+            print("=" * 50)
+            print("ANÁLISIS VISUAL")
+            print("=" * 50)
+            if result.visual.available:
+                print(f"Status: {result.visual.status}")
+                print(result.visual.findings)
+            else:
+                print(f"No disponible: {result.visual.error}")
 
-            print(f"\nCampo: {difference['field']}")
-
-            print(
-                f"Esperado: {difference['expected']}"
-            )
-
-            print(
-                f"Actual: {difference['actual']}"
-            )
-
-            print(
-                f"Severidad: {difference['severity']}"
-            )
-
-            print("-" * 50)
+        print("\n")
+        print("=" * 50)
+        print(f"RESUMEN: {result.summary.status}")
+        print("=" * 50)
+        print(
+            f"Total: {result.summary.total_discrepancies} | "
+            f"Críticos: {result.summary.critical} | "
+            f"Avisos: {result.summary.warning} | "
+            f"Info: {result.summary.info}"
+        )

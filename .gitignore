@@ -15,3 +15,6 @@ temp_images/
 
 # Documentos de prueba con datos reales/sensibles (no publicar)
 documents/
+
+# Artefactos locales de herramientas
+.claude/
