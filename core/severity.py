@@ -28,7 +28,7 @@ def _build_prompt(discrepancy: SemanticDiscrepancy) -> str:
         f"Tipo de cambio: {discrepancy.change_type.value}\n"
         f'Texto esperado: "{discrepancy.expected_text}"\n'
         f'Texto actual: "{discrepancy.actual_text}"\n'
-        f"Cambios internos detectados: {discrepancy.internal_changes}"
+        f"Cambios internos detectados: {[c.description for c in discrepancy.internal_changes]}"
     )
 
 

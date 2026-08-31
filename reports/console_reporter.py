@@ -1,4 +1,4 @@
-from core.models import ComparisonResult
+from core.models import ChangeKind, ComparisonResult
 
 
 class ConsoleReporter:
@@ -30,6 +30,17 @@ class ConsoleReporter:
                 print(f"Severidad: {d.severity.value if d.severity else 'SIN CLASIFICAR'}")
                 if d.severity_reasoning:
                     print(f"Razón: {d.severity_reasoning}")
+                cambios_reales = [c for c in d.internal_changes if c.kind == ChangeKind.REAL]
+                rellenos = [c for c in d.internal_changes if c.kind != ChangeKind.REAL]
+
+                if cambios_reales:
+                    print("Cambios reales:")
+                    for cambio in cambios_reales:
+                        print(f"  - {cambio.description}")
+                if rellenos:
+                    print("Datos/montos rellenados:")
+                    for relleno in rellenos:
+                        print(f"  - {relleno.description}")
                 print("-" * 50)
 
         if result.visual is not None:

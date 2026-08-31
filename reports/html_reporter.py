@@ -1,9 +1,15 @@
 from pathlib import Path
 
-from core.models import ComparisonResult
+from core.models import ChangeKind, ComparisonResult
 
 
 class HtmlReporter:
+
+    def _lista_html(self, descripciones: list[str]) -> str:
+        if not descripciones:
+            return "&mdash;"
+        items = "".join(f"<li>{d}</li>" for d in descripciones)
+        return f'<ul style="margin:0; padding-left:18px;">{items}</ul>'
 
     def generate_report(
         self,
@@ -18,12 +24,17 @@ class HtmlReporter:
             severity = d.severity.value if d.severity else "SIN CLASIFICAR"
             color = self.get_color(severity)
 
+            cambios_reales = [c.description for c in d.internal_changes if c.kind == ChangeKind.REAL]
+            rellenos = [c.description for c in d.internal_changes if c.kind != ChangeKind.REAL]
+
             rows += f"""
             <tr>
                 <td>{d.location}</td>
                 <td>{d.change_type.value}</td>
                 <td>{d.expected_text}</td>
                 <td>{d.actual_text}</td>
+                <td>{self._lista_html(cambios_reales)}</td>
+                <td>{self._lista_html(rellenos)}</td>
                 <td style="
                     color:{color};
                     font-weight:bold;
@@ -241,6 +252,8 @@ class HtmlReporter:
                         <th>Tipo</th>
                         <th>Esperado</th>
                         <th>Actual</th>
+                        <th>Cambios Reales</th>
+                        <th>Datos/Montos Rellenados</th>
                         <th>Severidad</th>
                     </tr>
 

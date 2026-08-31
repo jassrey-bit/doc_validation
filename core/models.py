@@ -22,6 +22,18 @@ class DiscoveryMethod(str, Enum):
     NONE = "none"
 
 
+class ChangeKind(str, Enum):
+    REAL = "real"  # cambio real de contenido (Cambió/Eliminó/Añadió)
+    VARIABLE_FILL = "variable_fill"  # marcador '[ ]' rellenado con un dato real
+    MONTO_FILL = "monto_fill"  # marcador '____' rellenado con un monto real
+
+
+@dataclass
+class InternalChange:
+    kind: ChangeKind
+    description: str  # texto legible, p.ej. 'Cambió: "X" por "Y"' o 'Dato variable rellenado: "Y"'
+
+
 @dataclass
 class StructuralResult:
     expected_sections: list[str]
@@ -37,7 +49,7 @@ class SemanticDiscrepancy:
     change_type: ChangeType
     expected_text: str
     actual_text: str
-    internal_changes: list[str]
+    internal_changes: list[InternalChange]
     severity: Severity | None = None
     severity_reasoning: str | None = None
 

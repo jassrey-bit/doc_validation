@@ -66,6 +66,8 @@ def compare_documents(
     enable_visual: bool = True,
     ignore_line_patterns: list[str] | None = None,
     ignore_skeleton_phrases: list[str] | None = None,
+    hide_variable_fills: bool = False,
+    monetary_noise_tokens: list[str] | None = None,
 ) -> ComparisonResult:
     """
     Compara dos documentos (PDF y/o DOCX, cualquier combinación) y devuelve un
@@ -74,6 +76,16 @@ def compare_documents(
 
     La estructura esperada se autodescubre del propio `expected_path` en cada
     corrida — no depende de ningún catálogo por tipo de documento.
+
+    `hide_variable_fills` oculta del desglose los cambios que solo llenan un
+    marcador de plantilla ('[ ]' o '____') con un dato real — útil para un
+    reporte más limpio cuando esos rellenos no son de interés para la
+    revisión.
+
+    `monetary_noise_tokens` reconoce montos rellenados aunque el blanco de
+    guiones bajos quede mezclado con texto de formato fijo específico del
+    documento (p.ej. ["M.N.", "MN"] para pesos mexicanos) — no asume ningún
+    formato de moneda por defecto.
     """
     actual_text, actual_lines_map = extract_text_with_page_mapping(actual_path, ignore_line_patterns)
     expected_text, expected_lines_map = extract_text_with_page_mapping(expected_path, ignore_line_patterns)
@@ -88,7 +100,9 @@ def compare_documents(
         discovery_method=discovery_method,
     )
 
-    semantic_result = diff_documents(actual_lines_map, expected_lines_map, ignore_skeleton_phrases)
+    semantic_result = diff_documents(
+        actual_lines_map, expected_lines_map, ignore_skeleton_phrases, hide_variable_fills, monetary_noise_tokens
+    )
 
     if semantic_result.discrepancies and ai_provider is not None:
         classify_discrepancies(semantic_result.discrepancies, ai_provider)
