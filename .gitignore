@@ -12,6 +12,7 @@ __pycache__/
 # Artefactos generados en tiempo de ejecución
 reports/report.html
 temp_images/
+storage/
 
 # Documentos de prueba con datos reales/sensibles (no publicar)
 documents/
