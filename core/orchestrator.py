@@ -1,5 +1,7 @@
 import shutil
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from core.ai.provider import AIProvider
 from core.exceptions import AIProviderError, VisualUnavailableError
@@ -30,17 +32,28 @@ def _run_visual_analysis(actual_path: str, expected_path: str, ai_provider: AIPr
 
     tmp_dir = tempfile.mkdtemp(prefix="doc_validation_")
     try:
-        actual_images = convert_document_to_images(actual_path, tmp_dir)
-        expected_images = convert_document_to_images(expected_path, tmp_dir)
+        t0 = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            actual_future = executor.submit(convert_document_to_images, actual_path, tmp_dir)
+            expected_future = executor.submit(convert_document_to_images, expected_path, tmp_dir)
+            actual_images = actual_future.result()
+            expected_images = expected_future.result()
+        print(f"[TIMING] conversión a imágenes (actual+expected, en paralelo): {time.perf_counter() - t0:.2f}s", flush=True)
 
         prompt = (
             "Compara las imágenes adjuntas de ambos documentos y genera el dictamen de QA "
             "según las instrucciones del sistema."
         )
+        t0 = time.perf_counter()
         raw = ai_provider.generate_multimodal(
             prompt,
             expected_images + actual_images,
             system_instruction=_VISUAL_SYSTEM_PROMPT,
+        )
+        print(
+            f"[TIMING] llamada IA multimodal ({len(expected_images) + len(actual_images)} imágenes): "
+            f"{time.perf_counter() - t0:.2f}s",
+            flush=True,
         )
 
         normalized = raw.upper().replace(" ", "")
@@ -87,11 +100,20 @@ def compare_documents(
     documento (p.ej. ["M.N.", "MN"] para pesos mexicanos) — no asume ningún
     formato de moneda por defecto.
     """
-    actual_text, actual_lines_map = extract_text_with_page_mapping(actual_path, ignore_line_patterns)
-    expected_text, expected_lines_map = extract_text_with_page_mapping(expected_path, ignore_line_patterns)
+    t_total = time.perf_counter()
 
+    t0 = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        actual_future = executor.submit(extract_text_with_page_mapping, actual_path, ignore_line_patterns)
+        expected_future = executor.submit(extract_text_with_page_mapping, expected_path, ignore_line_patterns)
+        actual_text, actual_lines_map = actual_future.result()
+        expected_text, expected_lines_map = expected_future.result()
+    print(f"[TIMING] extracción de texto (actual+expected, en paralelo): {time.perf_counter() - t0:.2f}s", flush=True)
+
+    t0 = time.perf_counter()
     expected_sections, discovery_method = discover_sections(expected_path, ai_provider=ai_provider)
     found_sections, missing_sections, score = score_structure(expected_sections, actual_text)
+    print(f"[TIMING] descubrimiento de estructura ({discovery_method}): {time.perf_counter() - t0:.2f}s", flush=True)
     structural = StructuralResult(
         expected_sections=expected_sections,
         found_sections=found_sections,
@@ -100,16 +122,35 @@ def compare_documents(
         discovery_method=discovery_method,
     )
 
+    t0 = time.perf_counter()
     semantic_result = diff_documents(
         actual_lines_map, expected_lines_map, ignore_skeleton_phrases, hide_variable_fills, monetary_noise_tokens
     )
+    print(
+        f"[TIMING] diff semántico ({len(semantic_result.discrepancies)} discrepancias): "
+        f"{time.perf_counter() - t0:.2f}s",
+        flush=True,
+    )
 
     if semantic_result.discrepancies and ai_provider is not None:
+        t0 = time.perf_counter()
         classify_discrepancies(semantic_result.discrepancies, ai_provider)
+        print(
+            f"[TIMING] clasificación de severidad ({len(semantic_result.discrepancies)} discrepancias): "
+            f"{time.perf_counter() - t0:.2f}s",
+            flush=True,
+        )
 
     summary = build_summary(semantic_result.discrepancies)
 
-    visual = _run_visual_analysis(actual_path, expected_path, ai_provider) if enable_visual else None
+    if enable_visual:
+        t0 = time.perf_counter()
+        visual = _run_visual_analysis(actual_path, expected_path, ai_provider)
+        print(f"[TIMING] análisis visual (total, incluye lo anterior): {time.perf_counter() - t0:.2f}s", flush=True)
+    else:
+        visual = None
+
+    print(f"[TIMING] === TOTAL compare_documents: {time.perf_counter() - t_total:.2f}s ===", flush=True)
 
     return ComparisonResult(
         actual_path=str(actual_path),
