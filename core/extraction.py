@@ -3,6 +3,10 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 from docx import Document
+from docx.oxml.table import CT_Tbl
+from docx.oxml.text.paragraph import CT_P
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
 from core.exceptions import ExtractionError
 
@@ -51,6 +55,21 @@ def _extract_from_pdf(pdf_path: str | Path, patterns: list[re.Pattern]) -> tuple
     return texto_completo, lineas_mapeadas
 
 
+def _iter_block_items(document: Document):
+    """
+    Recorre los elementos de nivel superior del cuerpo del documento
+    (párrafos y tablas) en el orden real en que aparecen. `Document.paragraphs`
+    y `Document.tables` son colecciones separadas que no preservan el orden
+    relativo entre ambos tipos, y `.paragraphs` excluye por completo el texto
+    dentro de tablas — por eso se itera directamente sobre el XML del body.
+    """
+    for child in document.element.body.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, document)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, document)
+
+
 def _extract_from_docx(docx_path: str | Path, patterns: list[re.Pattern]) -> tuple[str, LineMap]:
     texto_completo = ""
     lineas_mapeadas: LineMap = []
@@ -60,19 +79,39 @@ def _extract_from_docx(docx_path: str | Path, patterns: list[re.Pattern]) -> tup
     except Exception as e:
         raise ExtractionError(f"No se pudo abrir el DOCX '{docx_path}': {e}") from e
 
-    try:
-        for idx_parrafo, paragraph in enumerate(doc.paragraphs, start=1):
-            texto_parrafo = paragraph.text
-            if not texto_parrafo.strip():
+    def _agregar_linea(texto: str, ubicacion: str) -> None:
+        nonlocal texto_completo
+        for line in texto.split("\n"):
+            linea_limpia = _limpiar_linea(line)
+            if not linea_limpia:
                 continue
-            for line in texto_parrafo.split("\n"):
-                linea_limpia = _limpiar_linea(line)
-                if not linea_limpia:
-                    continue
-                linea_limpia = _aplicar_patrones_omitidos(linea_limpia, patterns)
-                ubicacion = f"Párrafo {idx_parrafo}"
-                lineas_mapeadas.append((linea_limpia, ubicacion))
-                texto_completo += linea_limpia + "\n"
+            linea_limpia = _aplicar_patrones_omitidos(linea_limpia, patterns)
+            lineas_mapeadas.append((linea_limpia, ubicacion))
+            texto_completo += linea_limpia + "\n"
+
+    try:
+        idx_parrafo = 0
+        idx_tabla = 0
+        for block in _iter_block_items(doc):
+            if isinstance(block, Paragraph):
+                idx_parrafo += 1
+                if block.text.strip():
+                    _agregar_linea(block.text, f"Párrafo {idx_parrafo}")
+                continue
+
+            idx_tabla += 1
+            for idx_fila, row in enumerate(block.rows, start=1):
+                celdas_vistas: set[int] = set()
+                for cell in row.cells:
+                    # `row.cells` repite la misma celda por cada columna que
+                    # abarca una celda combinada; sin este control esa celda
+                    # generaría una línea (y una posible discrepancia)
+                    # duplicada por cada columna que ocupa.
+                    if id(cell._tc) in celdas_vistas:
+                        continue
+                    celdas_vistas.add(id(cell._tc))
+                    if cell.text.strip():
+                        _agregar_linea(cell.text, f"Tabla {idx_tabla}, Fila {idx_fila}")
     except Exception as e:
         raise ExtractionError(f"Error al extraer texto de '{docx_path}': {e}") from e
 

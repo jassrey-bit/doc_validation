@@ -8,7 +8,8 @@ from pathlib import Path
 from threading import Lock
 
 from core import AIProvider, ComparisonResult, compare_documents
-from core.exceptions import CoreError
+from core.exceptions import CoreError, VisualUnavailableError
+from core.visual import convert_docx_to_pdf, render_pdf_to_images
 
 _executor = ThreadPoolExecutor(max_workers=2)
 _jobs: dict[str, "Job"] = {}
@@ -28,6 +29,9 @@ class Job:
     status: str = "pending"  # pending | done | error
     result: ComparisonResult | None = None
     error: str | None = None
+    actual_page_count: int = 0
+    expected_page_count: int = 0
+    pages_error: str | None = None
 
     @property
     def dir(self) -> Path:
@@ -40,6 +44,28 @@ class Job:
     @property
     def expected_stored_path(self) -> Path:
         return self.dir / f"expected_{self.expected_filename}"
+
+    @property
+    def actual_pages_dir(self) -> Path:
+        return self.dir / "pages" / "actual"
+
+    @property
+    def expected_pages_dir(self) -> Path:
+        return self.dir / "pages" / "expected"
+
+    @property
+    def actual_render_pdf_path(self) -> Path:
+        """PDF que un visor (pdf.js) puede cargar para este lado: el archivo
+        original si ya es PDF, o el PDF convertido y persistido si era DOCX."""
+        if self.actual_stored_path.suffix.lower() == ".pdf":
+            return self.actual_stored_path
+        return self.actual_pages_dir / "document.pdf"
+
+    @property
+    def expected_render_pdf_path(self) -> Path:
+        if self.expected_stored_path.suffix.lower() == ".pdf":
+            return self.expected_stored_path
+        return self.expected_pages_dir / "document.pdf"
 
 
 def submit_comparison_job(
@@ -130,6 +156,46 @@ def rerun_job(job_id: str, *, ai_provider: AIProvider | None) -> str | None:
     )
 
 
+def _persist_pages(document_path: Path, output_dir: Path) -> int:
+    """Renderiza cada página del documento a PNG y las deja en `output_dir`
+    como `page_1.png`, `page_2.png`, ... (nombres estables para servirlas por
+    número de página, sin importar el nombre original del archivo).
+
+    Si el documento es DOCX, además persiste el PDF intermedio (generado por
+    LibreOffice) como `document.pdf` en vez de descartarlo, para que un
+    visor en el navegador (pdf.js) pueda cargarlo directamente — con texto
+    seleccionable y posiciones reales, no solo la imagen rasterizada."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ext = document_path.suffix.lower()
+
+    if ext == ".docx":
+        converted = Path(convert_docx_to_pdf(str(document_path), str(output_dir)))
+        source_pdf = output_dir / "document.pdf"
+        if converted != source_pdf:
+            converted.replace(source_pdf)
+    elif ext == ".pdf":
+        source_pdf = document_path
+    else:
+        raise VisualUnavailableError(f"Formato de archivo no soportado para render visual: '{ext}'")
+
+    images = render_pdf_to_images(source_pdf, output_dir)
+    page_names = set()
+    for i, img_path in enumerate(images, start=1):
+        target = output_dir / f"page_{i}.png"
+        if img_path != target:
+            img_path.replace(target)
+        page_names.add(target.name)
+
+    # limpia cualquier otro subproducto, conservando solo las páginas y (si
+    # aplica) el PDF convertido que acabamos de persistir a propósito.
+    keep = page_names | ({"document.pdf"} if ext == ".docx" else set())
+    for leftover in output_dir.iterdir():
+        if leftover.name not in keep:
+            leftover.unlink(missing_ok=True)
+
+    return len(images)
+
+
 def _run_job(job: Job, ai_provider: AIProvider | None) -> None:
     try:
         job.result = compare_documents(
@@ -139,10 +205,24 @@ def _run_job(job: Job, ai_provider: AIProvider | None) -> None:
             enable_visual=job.enable_visual,
             hide_variable_fills=job.hide_variable_fills,
         )
-        job.status = "done"
     except CoreError as e:
         job.error = str(e)
         job.status = "error"
+        return
     except Exception as e:
         job.error = f"Error inesperado: {e}"
         job.status = "error"
+        return
+
+    # El render de páginas (incluye conversión DOCX->PDF vía LibreOffice, que
+    # es lenta) se intenta antes de marcar el job como "done": si el estado
+    # cambiara a "done" primero, un cliente que consulte el job justo en ese
+    # instante vería un resultado completo pero con `pages` a medio llenar
+    # (p.ej. expected_count en 0 aunque sí exista, solo que aún no terminó).
+    try:
+        job.actual_page_count = _persist_pages(job.actual_stored_path, job.actual_pages_dir)
+        job.expected_page_count = _persist_pages(job.expected_stored_path, job.expected_pages_dir)
+    except Exception as e:
+        job.pages_error = str(e)
+
+    job.status = "done"

@@ -121,6 +121,11 @@ def get_comparison(job_id: str) -> dict:
         "job_id": job.id,
         "status": "done",
         "result": ComparisonResultOut.model_validate(job.result).model_dump(mode="json"),
+        "pages": {
+            "actual_count": job.actual_page_count,
+            "expected_count": job.expected_page_count,
+            "error": job.pages_error,
+        },
     }
 
 
@@ -136,6 +141,33 @@ def download_comparison_file(job_id: str, kind: Literal["actual", "expected"]) -
 
     filename = job.actual_filename if kind == "actual" else job.expected_filename
     return FileResponse(path, filename=filename)
+
+
+@app.get("/comparisons/{job_id}/render-pdf/{kind}")
+def get_comparison_render_pdf(job_id: str, kind: Literal["actual", "expected"]) -> FileResponse:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job no encontrado")
+
+    path = job.actual_render_pdf_path if kind == "actual" else job.expected_render_pdf_path
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="PDF no disponible para este documento")
+
+    return FileResponse(path, media_type="application/pdf")
+
+
+@app.get("/comparisons/{job_id}/pages/{kind}/{page_num}")
+def get_comparison_page(job_id: str, kind: Literal["actual", "expected"], page_num: int) -> FileResponse:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job no encontrado")
+
+    pages_dir = job.actual_pages_dir if kind == "actual" else job.expected_pages_dir
+    path = pages_dir / f"page_{page_num}.png"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="página no encontrada")
+
+    return FileResponse(path, media_type="image/png")
 
 
 @app.post("/comparisons/{job_id}/rerun")
