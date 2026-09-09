@@ -143,6 +143,78 @@ def _desmenuzar_cambios_bloque(
     return desglose
 
 
+_LONGITUD_MINIMA_ETIQUETA = 5  # evita que placeholders cortos ("$", "[ ]", "1", "____") disparen el corte
+
+
+def _es_etiqueta_util(linea: str) -> bool:
+    """
+    Filtra líneas demasiado cortas o genéricas (números sueltos, símbolos,
+    marcadores de plantilla) para no usarlas como ancla de reordenamiento —
+    solo interesan líneas con contenido textual propio (p.ej. una etiqueta
+    o encabezado), no un placeholder o dato suelto que podría repetirse sin
+    identificar realmente un bloque.
+    """
+    texto = re.sub(r"[^\w]", "", linea, flags=re.UNICODE)
+    return len(texto) >= _LONGITUD_MINIMA_ETIQUETA and not texto.isdigit()
+
+
+def _reasignar_contenido_desplazado(
+    opcodes: list[tuple[str, int, int, int, int]],
+    txt_esperado: list[str],
+    txt_actual: list[str],
+) -> list[tuple[str, list[str], list[str]]]:
+    """
+    Cuando dos secciones estructuralmente similares intercambian su orden
+    entre el documento esperado y el actual (p.ej. dos bloques de firma que
+    se intercambiaron de posición), el diff por posición de difflib puede
+    terminar mezclando contenido del bloque siguiente dentro del bloque
+    anterior: como el documento actual presenta antes lo que en la
+    plantilla viene después, el rango "actual" de un bloque termina
+    incluyendo la etiqueta y el contenido que en realidad pertenecen al
+    bloque que sigue.
+
+    Esta función detecta esos casos buscando, dentro del rango actual de
+    cada bloque no-'equal', una línea que coincide con alguna línea del
+    bloque esperado INMEDIATAMENTE siguiente — y ahí recorta, moviendo esa
+    cola al bloque siguiente. Es intencionalmente conservadora: solo mira
+    un bloque hacia adelante y requiere una coincidencia textual exacta.
+
+    Devuelve bloques ya materializados (tag, líneas_esperadas,
+    líneas_actuales) en vez de únicamente los rangos de índices de difflib,
+    porque una vez reasignado el contenido ya no corresponde a un solo
+    rango contiguo del documento actual.
+    """
+    bloques = [
+        (tag, list(txt_esperado[i1:i2]), list(txt_actual[j1:j2]))
+        for tag, i1, i2, j1, j2 in opcodes
+        if tag != "equal"
+    ]
+
+    for idx in range(len(bloques) - 1):
+        tag, exp_lineas, act_lineas = bloques[idx]
+        if not act_lineas:
+            continue
+
+        _, exp_siguiente, _ = bloques[idx + 1]
+        etiquetas_siguientes = {l for l in exp_siguiente if _es_etiqueta_util(l)}
+        if not etiquetas_siguientes:
+            continue
+
+        punto_corte = next(
+            (i for i, linea in enumerate(act_lineas) if linea in etiquetas_siguientes),
+            None,
+        )
+        if punto_corte is None:
+            continue
+
+        cola = act_lineas[punto_corte:]
+        bloques[idx] = (tag, exp_lineas, act_lineas[:punto_corte])
+        tag_sig, exp_sig, act_sig = bloques[idx + 1]
+        bloques[idx + 1] = (tag_sig, exp_sig, cola + act_sig)
+
+    return bloques
+
+
 def diff_documents(
     actual_lines_map: LineMap,
     expected_lines_map: LineMap,
@@ -169,14 +241,15 @@ def diff_documents(
     txt_actual = [item[0] for item in actual_lines_map]
 
     matcher = difflib.SequenceMatcher(None, txt_esperado, txt_actual, autojunk=False)
+    opcodes = matcher.get_opcodes()
+    bloques = _reasignar_contenido_desplazado(opcodes, txt_esperado, txt_actual)
+    indices_j1 = [j1 for tag, _, _, j1, _ in opcodes if tag != "equal"]
+
     discrepancias: list[SemanticDiscrepancy] = []
 
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            continue
-
-        bloque_esperado = " ".join(txt_esperado[i1:i2]).strip()
-        bloque_actual = " ".join(txt_actual[j1:j2]).strip()
+    for (tag, exp_lineas, act_lineas), j1 in zip(bloques, indices_j1):
+        bloque_esperado = " ".join(exp_lineas).strip()
+        bloque_actual = " ".join(act_lineas).strip()
 
         if not bloque_esperado and not bloque_actual:
             continue
@@ -193,10 +266,21 @@ def diff_documents(
         idx_linea = j1 if j1 < len(actual_lines_map) else len(actual_lines_map) - 1
         ubicacion = actual_lines_map[idx_linea][1] if actual_lines_map else 1
 
+        # el recorte de _reasignar_contenido_desplazado puede dejar un lado
+        # vacío aunque el opcode original fuera 'replace' — el tipo de
+        # cambio debe reflejar eso (faltante/añadido) y no quedar como
+        # "modified" con un lado en blanco.
+        if bloque_actual and not bloque_esperado:
+            tipo_cambio = ChangeType.ADDED
+        elif bloque_esperado and not bloque_actual:
+            tipo_cambio = ChangeType.MISSING
+        else:
+            tipo_cambio = _TAG_TO_CHANGE_TYPE[tag]
+
         discrepancias.append(
             SemanticDiscrepancy(
                 location=ubicacion,
-                change_type=_TAG_TO_CHANGE_TYPE[tag],
+                change_type=tipo_cambio,
                 expected_text=bloque_esperado,
                 actual_text=bloque_actual,
                 internal_changes=cambios_internos,

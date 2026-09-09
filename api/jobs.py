@@ -197,32 +197,46 @@ def _persist_pages(document_path: Path, output_dir: Path) -> int:
 
 
 def _run_job(job: Job, ai_provider: AIProvider | None) -> None:
-    try:
-        job.result = compare_documents(
+    # `compare_documents` (que incluye las llamadas a IA cuando aplica —
+    # de lejos lo más lento del pipeline, decenas de segundos) y el render
+    # de páginas para el visor no dependen entre sí: ambos solo necesitan
+    # los archivos que ya se guardaron en disco. Antes corrían en secuencia,
+    # sumando la conversión de LibreOffice del render de páginas (que
+    # incluye su propia llamada a soffice) al tiempo total de espera; ahora
+    # corren en paralelo para que ese trabajo quede oculto dentro de la
+    # espera, ya de por sí larga, de la IA.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        compare_future = pool.submit(
+            compare_documents,
             str(job.actual_stored_path),
             str(job.expected_stored_path),
             ai_provider=ai_provider,
             enable_visual=job.enable_visual,
             hide_variable_fills=job.hide_variable_fills,
         )
-    except CoreError as e:
-        job.error = str(e)
-        job.status = "error"
-        return
-    except Exception as e:
-        job.error = f"Error inesperado: {e}"
-        job.status = "error"
-        return
+        actual_pages_future = pool.submit(_persist_pages, job.actual_stored_path, job.actual_pages_dir)
+        expected_pages_future = pool.submit(_persist_pages, job.expected_stored_path, job.expected_pages_dir)
 
-    # El render de páginas (incluye conversión DOCX->PDF vía LibreOffice, que
-    # es lenta) se intenta antes de marcar el job como "done": si el estado
-    # cambiara a "done" primero, un cliente que consulte el job justo en ese
-    # instante vería un resultado completo pero con `pages` a medio llenar
-    # (p.ej. expected_count en 0 aunque sí exista, solo que aún no terminó).
-    try:
-        job.actual_page_count = _persist_pages(job.actual_stored_path, job.actual_pages_dir)
-        job.expected_page_count = _persist_pages(job.expected_stored_path, job.expected_pages_dir)
-    except Exception as e:
-        job.pages_error = str(e)
+        try:
+            job.result = compare_future.result()
+        except CoreError as e:
+            job.error = str(e)
+            job.status = "error"
+        except Exception as e:
+            job.error = f"Error inesperado: {e}"
+            job.status = "error"
 
-    job.status = "done"
+        # El render de páginas se espera antes de marcar el job como "done"
+        # (aunque la comparación haya fallado): si el estado cambiara a
+        # "done" primero, un cliente que consulte el job justo en ese
+        # instante vería un resultado completo pero con `pages` a medio
+        # llenar (p.ej. expected_count en 0 aunque sí exista, solo que aún
+        # no terminó).
+        try:
+            job.actual_page_count = actual_pages_future.result()
+            job.expected_page_count = expected_pages_future.result()
+        except Exception as e:
+            job.pages_error = str(e)
+
+    if job.status != "error":
+        job.status = "done"
