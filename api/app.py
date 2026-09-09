@@ -9,7 +9,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from api.jobs import get_job, list_jobs, rerun_job, submit_comparison_job
+from api.jobs import get_job, list_jobs, rerun_job, retry_visual, submit_comparison_job
 from api.schemas import ComparisonResultOut
 from core import AIProvider, GeminiProvider
 from core.exceptions import AIProviderError
@@ -176,3 +176,24 @@ def rerun_comparison(job_id: str) -> dict:
     if new_job_id is None:
         raise HTTPException(status_code=404, detail="job o archivos originales no encontrados")
     return {"job_id": new_job_id, "status": "pending"}
+
+
+@app.post("/comparisons/{job_id}/visual/retry")
+def retry_visual_analysis(job_id: str) -> dict:
+    # Ruta síncrona (no async def): FastAPI la corre en su threadpool, así
+    # que la espera de la IA (decenas de segundos) no bloquea el event loop
+    # ni el resto de las peticiones concurrentes.
+    job = retry_visual(job_id, ai_provider=_ai_provider)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job o resultado no encontrados")
+
+    return {
+        "job_id": job.id,
+        "status": "done",
+        "result": ComparisonResultOut.model_validate(job.result).model_dump(mode="json"),
+        "pages": {
+            "actual_count": job.actual_page_count,
+            "expected_count": job.expected_page_count,
+            "error": job.pages_error,
+        },
+    }

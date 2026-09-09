@@ -26,7 +26,7 @@ _VISUAL_SYSTEM_PROMPT = (
 )
 
 
-def _run_visual_analysis(actual_path: str, expected_path: str, ai_provider: AIProvider | None) -> VisualVerdict:
+def run_visual_analysis(actual_path: str, expected_path: str, ai_provider: AIProvider | None) -> VisualVerdict:
     if ai_provider is None:
         return VisualVerdict(available=False, error="Análisis visual deshabilitado: no se proporcionó un proveedor de IA.")
 
@@ -145,7 +145,7 @@ def compare_documents(
 
     if enable_visual:
         t0 = time.perf_counter()
-        visual = _run_visual_analysis(actual_path, expected_path, ai_provider)
+        visual = run_visual_analysis(actual_path, expected_path, ai_provider)
         print(f"[TIMING] análisis visual (total, incluye lo anterior): {time.perf_counter() - t0:.2f}s", flush=True)
     else:
         visual = None

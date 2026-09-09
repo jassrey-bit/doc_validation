@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from threading import Lock
 
-from core import AIProvider, ComparisonResult, compare_documents
+from core import AIProvider, ComparisonResult, compare_documents, run_visual_analysis
 from core.exceptions import CoreError, VisualUnavailableError
 from core.visual import convert_docx_to_pdf, render_pdf_to_images
 
@@ -154,6 +154,21 @@ def rerun_job(job_id: str, *, ai_provider: AIProvider | None) -> str | None:
         enable_visual=original.enable_visual,
         hide_variable_fills=original.hide_variable_fills,
     )
+
+
+def retry_visual(job_id: str, *, ai_provider: AIProvider | None) -> Job | None:
+    """Vuelve a correr solo el análisis visual de un job ya terminado,
+    reutilizando la estructura y la semántica ya calculadas — evita repetir
+    la extracción de texto y las llamadas a IA de clasificación, que no
+    tienen nada que ver con por qué falló el veredicto visual."""
+    job = get_job(job_id)
+    if job is None or job.result is None:
+        return None
+
+    job.result.visual = run_visual_analysis(
+        str(job.actual_stored_path), str(job.expected_stored_path), ai_provider
+    )
+    return job
 
 
 def _persist_pages(document_path: Path, output_dir: Path) -> int:

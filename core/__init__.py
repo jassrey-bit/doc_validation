@@ -11,10 +11,11 @@ from core.models import (
     StructuralResult,
     VisualVerdict,
 )
-from core.orchestrator import compare_documents
+from core.orchestrator import compare_documents, run_visual_analysis
 
 __all__ = [
     "compare_documents",
+    "run_visual_analysis",
     "ComparisonResult",
     "ComparisonSummary",
     "StructuralResult",
