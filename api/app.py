@@ -9,7 +9,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from api.jobs import get_job, list_jobs, rerun_job, retry_visual, submit_comparison_job
+from api.jobs import get_job, list_jobs, load_persisted_jobs, rerun_job, retry_visual, submit_comparison_job
 from api.schemas import ComparisonResultOut
 from core import AIProvider, GeminiProvider
 from core.exceptions import AIProviderError
@@ -24,6 +24,7 @@ _ai_provider: AIProvider | None = None
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _ai_provider
+    load_persisted_jobs()
     try:
         _ai_provider = GeminiProvider()
     except AIProviderError as e:

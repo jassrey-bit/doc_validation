@@ -7,7 +7,7 @@ Motor de comparación y validación de documentos (PDF/DOCX), expuesto como API 
 El proyecto compara un documento **generado** ("actual") contra su **plantilla/documento de referencia** ("expected") y determina si el documento generado se desvía de lo esperado. Resuelve el problema de revisar manualmente documentos legales/financieros (contratos, formatos con datos variables) buscando:
 
 - Secciones o cláusulas faltantes.
-- Cambios reales de contenido (texto modificado, eliminado o añadido), distinguiéndolos de simples rellenos de plantilla (campos `[ ]` completados con datos reales).
+- Cambios reales de contenido (texto modificado, eliminado o añadido), distinguiéndolos de simples rellenos de plantilla (campos `[ ]` o `[Etiqueta]` completados con datos reales).
 - Diferencias visuales de formato (tablas, tipografía, márgenes, imágenes), vía IA.
 
 Cada discrepancia se clasifica por severidad (`CRITICO`, `AVISO`, `INFO`) para priorizar la revisión humana.
@@ -39,6 +39,8 @@ flowchart TD
 ```
 
 `api/jobs.py` mantiene una cola en memoria (`ThreadPoolExecutor`) y persiste los archivos subidos en disco (`storage/comparisons/<job_id>/`), lo que permite listar el historial, descargar los archivos originales y volver a ejecutar (`rerun`) una comparación sin resubirlos.
+
+Junto a esos archivos, cada job persiste su estado en `storage/comparisons/<job_id>/metadata.json`. Al arrancar, la API (`load_persisted_jobs()` en el `lifespan` de `api/app.py`) reconstruye en memoria los jobs de ejecuciones anteriores a partir de esos archivos, para que el historial sobreviva a un reinicio del proceso (un job que quedó `pending` a media ejecución se marca como `error`, ya que el worker que lo procesaba murió con el proceso anterior). Los jobs (y sus archivos) con más de `RETENTION_PERIOD` (5 días) se purgan automáticamente, tanto al arrancar como en las rutas de lectura de jobs (`get_job`, `list_jobs`, `submit_comparison_job`), sin necesidad de un proceso aparte.
 
 Tras terminar `compare_documents()`, el job también renderiza cada página de ambos documentos a PNG (y, si el original es DOCX, persiste el PDF intermedio generado por LibreOffice) en `storage/comparisons/<job_id>/pages/{actual,expected}/`. Esto habilita un visor de documentos página por página en el frontend (tipo pdf.js), sin depender del análisis visual por IA.
 
@@ -164,6 +166,7 @@ Con el servicio arriba (local o Docker), el frontend interactúa con estos endpo
 | `GET /comparisons/{job_id}/render-pdf/{kind}` | Devuelve el PDF para visor de un lado del job: el archivo original si ya era PDF, o el PDF convertido desde DOCX (persistido, no se regenera en cada request). |
 | `GET /comparisons/{job_id}/pages/{kind}/{page_num}` | Devuelve la imagen PNG renderizada de una página específica (`page_num` empieza en 1). |
 | `POST /comparisons/{job_id}/rerun` | Vuelve a ejecutar la comparación con los mismos archivos ya almacenados. |
+| `POST /comparisons/{job_id}/visual/retry` | Reintenta solo el análisis visual de un job ya `done`, reutilizando la estructura y semántica ya calculadas (no repite extracción de texto ni clasificación de severidad). |
 
 ### Tests y reportes de `core/`
 
@@ -197,7 +200,7 @@ pytest tests/test_login.py
 - **Nuevo endpoint o cambio en el ciclo de vida de un job**: lógica de negocio en `api/jobs.py`, ruta en `api/app.py`, forma de la respuesta en `api/schemas.py`.
 - **Reglas de comparación semántica** (qué cuenta como relleno de plantilla vs. cambio real): `core/semantic.py`.
 - **Criterios de severidad**: prompt y parsing en `core/severity.py`.
-- **Descubrimiento de estructura**: heurísticas en `core/structure.py`; prompt de fallback por IA en `core/structure_ai.py`.
+- **Descubrimiento de estructura**: heurísticas en `core/structure.py` (incluye detección de la raya de firma `___` para no tratar el bloque de cierre —nombre/cargo/empresa del firmante— como sección estructural); prompt de fallback por IA en `core/structure_ai.py`.
 - **Extracción de DOCX** (qué se lee del documento: párrafos, tablas, orden entre ambos): `_iter_block_items` y `_extract_from_docx` en `core/extraction.py`.
 - **Render de páginas para el visor del frontend** (PNG por página, PDF persistido para DOCX): `_persist_pages` en `api/jobs.py`; los endpoints que lo exponen están en `api/app.py`.
 - **Vertiente 2 (Playwright)**: al desarrollarse, los Page Objects van en `pages/` y los tests en `tests/`, siguiendo el patrón ya usado por `login_page.py`/`test_login.py`.
@@ -213,6 +216,10 @@ pytest tests/test_login.py
 
 ## Cambios recientes
 
+- Se agregó `POST /comparisons/{job_id}/visual/retry` para reintentar solo el veredicto visual de un job ya terminado (`api/jobs.py` + `api/app.py`).
+- Los jobs ahora **persisten su estado en disco** (`metadata.json` por job) y se **recargan al arrancar la API**, con purga automática pasado `RETENTION_PERIOD` (5 días); antes solo vivían en memoria y se perdían al reiniciar el proceso.
+- La detección de relleno de plantilla en `core/semantic.py` ahora reconoce marcadores con etiqueta (`[Nombre]`, `[Fecha]`, ...), no solo corchetes vacíos (`[ ]`); el texto esperado que se expone al frontend cuando `hide_variable_fills` está activo también sustituye esos marcadores por el dato real capturado, para que un diff palabra por palabra en el frontend no los marque como discrepancia.
+- `core/structure.py` ahora detecta la raya de firma (`____`, `----`, etc.) y deja de considerar como sección estructural todo el bloque de cierre que sigue (nombre, cargo, empresa del firmante), que es contenido variable.
 - El job ahora **renderiza y persiste las páginas de ambos documentos** como imágenes PNG (y, para DOCX, el PDF convertido) en `storage/comparisons/<job_id>/pages/`, con nuevos endpoints (`render-pdf`, `pages/{kind}/{page_num}`) y un conteo de páginas (`pages.actual_count`/`pages.expected_count`) en la respuesta del job — pensado para un visor de documentos en el frontend.
 - La **extracción de DOCX ahora incluye el contenido de tablas** (antes solo párrafos), preservando el orden real entre párrafos y tablas y evitando duplicados por celdas combinadas.
 - La **clasificación de severidad** ahora agrupa las discrepancias en lotes de hasta 40 por llamada a la IA (antes una llamada por discrepancia), con los lotes en paralelo; la extracción de texto y la conversión a imágenes para el análisis visual también se paralelizaron. Se agregaron mediciones de tiempo (`[TIMING]`) por etapa para monitorear el impacto.

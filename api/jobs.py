@@ -1,21 +1,64 @@
 from __future__ import annotations
 
+import json
+import logging
+import shutil
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 
-from core import AIProvider, ComparisonResult, compare_documents, run_visual_analysis
+from core import (
+    AIProvider,
+    ComparisonResult,
+    ComparisonSummary,
+    SemanticDiscrepancy,
+    SemanticResult,
+    StructuralResult,
+    VisualVerdict,
+    compare_documents,
+    run_visual_analysis,
+)
+from api.schemas import ComparisonResultOut
 from core.exceptions import CoreError, VisualUnavailableError
+from core.models import InternalChange
 from core.visual import convert_docx_to_pdf, render_pdf_to_images
+
+logger = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=2)
 _jobs: dict[str, "Job"] = {}
 _lock = Lock()
 
 STORAGE_DIR = Path(__file__).resolve().parent.parent / "storage" / "comparisons"
+
+# Los reportes (metadata en memoria + archivos en disco) se descartan pasado
+# este tiempo: no tiene sentido acumular ejecuciones viejas indefinidamente.
+RETENTION_PERIOD = timedelta(days=5)
+# La purga se dispara desde rutas de lectura frecuentes (get_job se llama en
+# cada poll de un job pendiente), así que se limita a correr como mucho una
+# vez por este intervalo en vez de escanear todos los jobs en cada llamada.
+_PURGE_CHECK_INTERVAL = timedelta(hours=1)
+_last_purge_at: datetime | None = None
+
+
+def _purge_expired_jobs() -> None:
+    global _last_purge_at
+    now = datetime.now(timezone.utc)
+
+    with _lock:
+        if _last_purge_at is not None and now - _last_purge_at < _PURGE_CHECK_INTERVAL:
+            return
+        _last_purge_at = now
+        cutoff = now - RETENTION_PERIOD
+        expired = [job for job in _jobs.values() if job.created_at < cutoff]
+        for job in expired:
+            del _jobs[job.id]
+
+    for job in expired:
+        shutil.rmtree(job.dir, ignore_errors=True)
 
 
 @dataclass
@@ -67,6 +110,132 @@ class Job:
             return self.expected_stored_path
         return self.expected_pages_dir / "document.pdf"
 
+    @property
+    def metadata_path(self) -> Path:
+        return self.dir / "metadata.json"
+
+
+def _write_metadata(job: Job) -> None:
+    """Persiste el estado del job a disco (junto a sus archivos) para que
+    sobreviva a un reinicio del proceso: `_jobs` solo vive en memoria."""
+    data = {
+        "id": job.id,
+        "actual_filename": job.actual_filename,
+        "expected_filename": job.expected_filename,
+        "enable_visual": job.enable_visual,
+        "hide_variable_fills": job.hide_variable_fills,
+        "created_at": job.created_at.isoformat(),
+        "status": job.status,
+        "error": job.error,
+        "actual_page_count": job.actual_page_count,
+        "expected_page_count": job.expected_page_count,
+        "pages_error": job.pages_error,
+        "result": (
+            ComparisonResultOut.model_validate(job.result).model_dump(mode="json")
+            if job.result is not None
+            else None
+        ),
+    }
+    try:
+        job.metadata_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        logger.exception("No se pudo guardar metadata.json para el job %s", job.id)
+
+
+def _result_from_out(out: ComparisonResultOut) -> ComparisonResult:
+    return ComparisonResult(
+        actual_path=out.actual_path,
+        expected_path=out.expected_path,
+        structural=StructuralResult(**out.structural.model_dump()),
+        semantic=SemanticResult(
+            matches=out.semantic.matches,
+            details=out.semantic.details,
+            discrepancies=[
+                SemanticDiscrepancy(
+                    location=d.location,
+                    change_type=d.change_type,
+                    expected_text=d.expected_text,
+                    actual_text=d.actual_text,
+                    internal_changes=[
+                        InternalChange(kind=ic.kind, description=ic.description) for ic in d.internal_changes
+                    ],
+                    severity=d.severity,
+                    severity_reasoning=d.severity_reasoning,
+                )
+                for d in out.semantic.discrepancies
+            ],
+        ),
+        visual=VisualVerdict(**out.visual.model_dump()) if out.visual is not None else None,
+        summary=ComparisonSummary(**out.summary.model_dump()),
+    )
+
+
+def _job_from_metadata(data: dict) -> Job:
+    job = Job(
+        id=data["id"],
+        actual_filename=data["actual_filename"],
+        expected_filename=data["expected_filename"],
+        enable_visual=data["enable_visual"],
+        hide_variable_fills=data["hide_variable_fills"],
+        created_at=datetime.fromisoformat(data["created_at"]),
+        status=data["status"],
+        error=data["error"],
+        actual_page_count=data["actual_page_count"],
+        expected_page_count=data["expected_page_count"],
+        pages_error=data["pages_error"],
+    )
+    if data["result"] is not None:
+        job.result = _result_from_out(ComparisonResultOut.model_validate(data["result"]))
+
+    if job.status == "pending":
+        # El worker que lo estaba procesando murió junto con el proceso
+        # anterior: ya no va a terminar, así que no tiene sentido dejarlo
+        # como "pending" para siempre.
+        job.status = "error"
+        job.error = "Ejecución interrumpida por un reinicio del servicio."
+
+    return job
+
+
+def load_persisted_jobs() -> None:
+    """Reconstruye en memoria los jobs guardados en disco (metadata.json de
+    ejecuciones previas) para que los reportes sobrevivan a un reinicio del
+    proceso mientras sigan dentro de RETENTION_PERIOD. Se llama una sola vez
+    al arrancar la API.
+
+    Una carpeta sin metadata.json es de antes de que este mecanismo
+    existiera (o quedó corrupta a medio escribir): se deja tal cual en vez
+    de borrarla, ya que no hay forma confiable de saber su antigüedad real."""
+    if not STORAGE_DIR.exists():
+        return
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - RETENTION_PERIOD
+    loaded: dict[str, Job] = {}
+
+    for job_dir in STORAGE_DIR.iterdir():
+        if not job_dir.is_dir():
+            continue
+        metadata_path = job_dir / "metadata.json"
+        if not metadata_path.exists():
+            continue
+
+        try:
+            data = json.loads(metadata_path.read_text(encoding="utf-8"))
+            job = _job_from_metadata(data)
+        except Exception:
+            logger.exception("metadata.json inválido en %s, se omite", job_dir)
+            continue
+
+        if job.created_at < cutoff:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            continue
+
+        loaded[job.id] = job
+
+    with _lock:
+        _jobs.update(loaded)
+
 
 def submit_comparison_job(
     actual_bytes: bytes,
@@ -78,6 +247,7 @@ def submit_comparison_job(
     enable_visual: bool,
     hide_variable_fills: bool,
 ) -> str:
+    _purge_expired_jobs()
     job_id = uuid.uuid4().hex
     job = Job(
         id=job_id,
@@ -92,12 +262,14 @@ def submit_comparison_job(
     job.dir.mkdir(parents=True, exist_ok=True)
     job.actual_stored_path.write_bytes(actual_bytes)
     job.expected_stored_path.write_bytes(expected_bytes)
+    _write_metadata(job)
 
     _executor.submit(_run_job, job, ai_provider)
     return job_id
 
 
 def get_job(job_id: str) -> Job | None:
+    _purge_expired_jobs()
     with _lock:
         return _jobs.get(job_id)
 
@@ -111,6 +283,7 @@ def list_jobs(
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[list[Job], int]:
+    _purge_expired_jobs()
     with _lock:
         jobs = list(_jobs.values())
 
@@ -168,6 +341,7 @@ def retry_visual(job_id: str, *, ai_provider: AIProvider | None) -> Job | None:
     job.result.visual = run_visual_analysis(
         str(job.actual_stored_path), str(job.expected_stored_path), ai_provider
     )
+    _write_metadata(job)
     return job
 
 
@@ -255,3 +429,5 @@ def _run_job(job: Job, ai_provider: AIProvider | None) -> None:
 
     if job.status != "error":
         job.status = "done"
+
+    _write_metadata(job)

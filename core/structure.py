@@ -11,6 +11,7 @@ from core.models import DiscoveryMethod
 _MAX_TITLE_LEN = 100
 _MIN_TITLE_LEN = 6
 _CENTER_TOLERANCE_PX = 15.0
+_LINEA_FIRMA_RE = re.compile(r"^[_\-–—]{5,}$")
 
 
 def _es_ruido(texto: str) -> bool:
@@ -22,6 +23,13 @@ def _es_ruido(texto: str) -> bool:
     if t.isdigit():
         return True
     return False
+
+
+def _es_linea_firma(texto: str) -> bool:
+    """Detecta la raya de firma (p.ej. '____________'): marca el inicio del
+    bloque de cierre (nombre, cargo, empresa del firmante), que es contenido
+    variable y no debe tratarse como una sección estructural del documento."""
+    return bool(_LINEA_FIRMA_RE.match(texto.strip()))
 
 
 def _discover_from_toc(pdf_path: str | Path) -> list[str]:
@@ -53,6 +61,7 @@ def _discover_pdf_heuristic(pdf_path: str | Path) -> list[str]:
             ancho_pagina = page.rect.width
             centro_pagina = ancho_pagina / 2
             blocks = page.get_text("dict")["blocks"]
+            tras_firma = False
 
             for b in blocks:
                 if "lines" not in b:
@@ -60,6 +69,15 @@ def _discover_pdf_heuristic(pdf_path: str | Path) -> list[str]:
                 for l in b["lines"]:
                     for s in l["spans"]:
                         texto = s["text"].strip()
+                        if not texto:
+                            continue
+
+                        if _es_linea_firma(texto):
+                            tras_firma = True
+                            continue
+                        if tras_firma:
+                            continue
+
                         if _es_ruido(texto):
                             continue
 
@@ -87,8 +105,18 @@ def _discover_docx_heuristic(docx_path: str | Path) -> list[str]:
     except Exception as e:
         raise ExtractionError(f"No se pudo abrir el DOCX para heurística visual '{docx_path}': {e}") from e
 
+    tras_firma = False
     for paragraph in doc.paragraphs:
         texto = paragraph.text.strip()
+        if not texto:
+            continue
+
+        if _es_linea_firma(texto):
+            tras_firma = True
+            continue
+        if tras_firma:
+            continue
+
         if _es_ruido(texto):
             continue
 

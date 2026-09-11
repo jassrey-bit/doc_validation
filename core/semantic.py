@@ -54,7 +54,7 @@ def _extraer_esqueleto_fijo(texto: str, ignore_phrases: list[str]) -> list[str]:
     return palabras_estaticas
 
 
-_BRACKET_PLACEHOLDER_PATTERN = re.compile(r"\[\s*\]")
+_BRACKET_PLACEHOLDER_PATTERN = re.compile(r"\[[^\[\]]*\]")
 _MONTO_PLACEHOLDER_PATTERN = re.compile(r"_+")
 
 
@@ -92,12 +92,12 @@ def _desmenuzar_cambios_bloque(
     texto_actual: str,
     hide_variable_fills: bool = False,
     monetary_noise_tokens: list[str] | None = None,
-) -> list[InternalChange]:
+) -> tuple[list[InternalChange], str]:
     """
     Diff palabra por palabra dentro de un bloque, ya normalizado. Se
     distinguen tres categorías (ver ChangeKind): cambios reales
     ("Cambió"/"Eliminó"/"Añadió"), datos variables rellenados (marcador
-    '[ ]' -> dato real) y montos rellenados (marcador '____' -> monto real),
+    '[ ]' o '[Etiqueta]' -> dato real) y montos rellenados (marcador '____' -> monto real),
     ya que estas dos últimas representan el llenado esperado de una
     plantilla, no necesariamente un problema. Si `hide_variable_fills` es
     True, esas dos categorías se omiten por completo del desglose.
@@ -106,12 +106,22 @@ def _desmenuzar_cambios_bloque(
     guiones bajos queda mezclado con texto de formato fijo específico del
     documento (p.ej. ["M.N.", "MN"] para pesos mexicanos) — sin asumir
     ninguno por defecto, ya que ese formato varía por tipo de documento.
+
+    Además del desglose, devuelve el texto esperado "visible": si
+    `hide_variable_fills` es True, los marcadores de plantilla se
+    sustituyen ahí mismo por el dato realmente capturado en el documento
+    actual. Así, quien resalte diferencias palabra por palabra a partir de
+    este texto (tarjetas antes/después, overlay sobre el PDF) ya no
+    encuentra una diferencia en esos tramos y no los marca como
+    discrepancia — consistente con que el desglose tampoco los reporta.
     """
     esp_norm = _normalizar_texto_bloque(texto_esperado)
     act_norm = _normalizar_texto_bloque(texto_actual)
 
     palabras_esp = esp_norm.split()
     palabras_act = act_norm.split()
+    palabras_esp_visibles = list(palabras_esp)
+    offset = 0
 
     matcher = difflib.SequenceMatcher(None, palabras_esp, palabras_act, autojunk=False)
     desglose: list[InternalChange] = []
@@ -123,13 +133,21 @@ def _desmenuzar_cambios_bloque(
         sub_actual = " ".join(palabras_act[j1:j2])
 
         if tag == "replace":
-            if _es_relleno_de_marcador(sub_esperado, _BRACKET_PLACEHOLDER_PATTERN):
-                if not hide_variable_fills:
+            es_variable = _es_relleno_de_marcador(sub_esperado, _BRACKET_PLACEHOLDER_PATTERN)
+            es_monto = not es_variable and _es_relleno_de_marcador(
+                sub_esperado, _MONTO_PLACEHOLDER_PATTERN, monetary_noise_tokens
+            )
+
+            if es_variable or es_monto:
+                if hide_variable_fills:
+                    reemplazo = palabras_act[j1:j2]
+                    palabras_esp_visibles[i1 + offset : i2 + offset] = reemplazo
+                    offset += len(reemplazo) - (i2 - i1)
+                elif es_variable:
                     desglose.append(
                         InternalChange(ChangeKind.VARIABLE_FILL, f'Dato variable rellenado: "{sub_actual}"')
                     )
-            elif _es_relleno_de_marcador(sub_esperado, _MONTO_PLACEHOLDER_PATTERN, monetary_noise_tokens):
-                if not hide_variable_fills:
+                else:
                     desglose.append(InternalChange(ChangeKind.MONTO_FILL, f'Monto rellenado: "{sub_actual}"'))
             else:
                 desglose.append(
@@ -140,7 +158,7 @@ def _desmenuzar_cambios_bloque(
         elif tag == "insert":
             desglose.append(InternalChange(ChangeKind.REAL, f'Añadió: "{sub_actual}"'))
 
-    return desglose
+    return desglose, " ".join(palabras_esp_visibles)
 
 
 _LONGITUD_MINIMA_ETIQUETA = 5  # evita que placeholders cortos ("$", "[ ]", "1", "____") disparen el corte
@@ -227,7 +245,7 @@ def diff_documents(
     (ver core.extraction.extract_text_with_page_mapping).
 
     `hide_variable_fills` controla si los cambios que solo llenan un
-    marcador de plantilla ('[ ]' o '____') se muestran etiquetados como tal
+    marcador de plantilla ('[ ]', '[Etiqueta]' o '____') se muestran etiquetados como tal
     (default) u se ocultan por completo del desglose interno.
 
     `monetary_noise_tokens` es una lista opcional de tokens de formato de
@@ -257,7 +275,7 @@ def diff_documents(
         if _extraer_esqueleto_fijo(bloque_esperado, phrases) == _extraer_esqueleto_fijo(bloque_actual, phrases):
             continue  # misma plantilla, solo cambiaron datos dinámicos
 
-        cambios_internos = _desmenuzar_cambios_bloque(
+        cambios_internos, bloque_esperado_visible = _desmenuzar_cambios_bloque(
             bloque_esperado, bloque_actual, hide_variable_fills, monetary_noise_tokens
         )
         if not cambios_internos:
@@ -281,7 +299,7 @@ def diff_documents(
             SemanticDiscrepancy(
                 location=ubicacion,
                 change_type=tipo_cambio,
-                expected_text=bloque_esperado,
+                expected_text=bloque_esperado_visible if hide_variable_fills else bloque_esperado,
                 actual_text=bloque_actual,
                 internal_changes=cambios_internos,
             )
