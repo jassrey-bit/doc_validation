@@ -11,8 +11,8 @@ load_dotenv()
 
 # Cadena de modelos por defecto, del más ligero al más robusto. Si uno falla
 # (saturado, deprecado, cuota agotada) se prueba el siguiente automáticamente.
-_DEFAULT_TEXT_MODELS = ["gemini-3.1-flash-lite", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-flash-latest"]
-_DEFAULT_VISION_MODELS = ["gemini-3.1-flash-lite", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-flash-latest"]
+_DEFAULT_TEXT_MODELS = ["gemini-3.1-flash-lite", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-flash-latest", "gemini-3.8-flash"]
+_DEFAULT_VISION_MODELS = ["gemini-3.1-flash-lite", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-flash-latest", "gemini-3.8-flash"]
 
 # Errores que NO vale la pena reintentar con otro modelo: afectan a la API key
 # o a la solicitud en su conjunto, no a un modelo en particular (p.ej. Gemini
