@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -32,9 +33,23 @@ def convert_docx_to_pdf(docx_path: str | Path, output_dir: str | Path, timeout: 
             "no se puede generar la vista visual de archivos DOCX."
         )
 
+    # Cada conversión usa su propio perfil de usuario temporal: LibreOffice no
+    # admite dos instancias simultáneas sobre el mismo perfil (la segunda
+    # termina sin convertir y sin mensaje de error), y un job convierte hasta
+    # cuatro DOCX a la vez (render de páginas + análisis visual, actual y expected).
+    profile_dir = tempfile.mkdtemp(prefix="lo_profile_")
     try:
         result = subprocess.run(
-            [soffice, "--headless", "--convert-to", "pdf", "--outdir", str(output_dir), str(docx_path)],
+            [
+                soffice,
+                f"-env:UserInstallation={Path(profile_dir).as_uri()}",
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(output_dir),
+                str(Path(docx_path).resolve()),
+            ],
             capture_output=True,
             timeout=timeout,
             text=True,
@@ -43,13 +58,13 @@ def convert_docx_to_pdf(docx_path: str | Path, output_dir: str | Path, timeout: 
         raise VisualUnavailableError(f"LibreOffice tardó demasiado en convertir '{docx_path}'") from e
     except Exception as e:
         raise VisualUnavailableError(f"Fallo al invocar LibreOffice: {e}") from e
-
-    if result.returncode != 0:
-        raise VisualUnavailableError(f"LibreOffice falló al convertir '{docx_path}': {result.stderr.strip()}")
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
 
     expected_pdf = Path(output_dir) / (Path(docx_path).stem + ".pdf")
-    if not expected_pdf.exists():
-        raise VisualUnavailableError(f"LibreOffice no generó el PDF esperado para '{docx_path}'")
+    if result.returncode != 0 or not expected_pdf.exists():
+        detalle = result.stderr.strip() or result.stdout.strip() or f"código de salida {result.returncode}"
+        raise VisualUnavailableError(f"LibreOffice no pudo convertir '{docx_path}' a PDF: {detalle}")
 
     return expected_pdf
 

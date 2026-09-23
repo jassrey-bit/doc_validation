@@ -132,23 +132,34 @@ def compare_documents(
         flush=True,
     )
 
-    if semantic_result.discrepancies and ai_provider is not None:
+    # La clasificación de severidad y el análisis visual son las dos etapas
+    # lentas (llamadas a IA) y no dependen entre sí: corren en paralelo para
+    # que el tiempo total sea el de la más lenta, no la suma de ambas.
+    def _clasificar() -> None:
+        if semantic_result.discrepancies and ai_provider is not None:
+            t0 = time.perf_counter()
+            classify_discrepancies(semantic_result.discrepancies, ai_provider)
+            print(
+                f"[TIMING] clasificación de severidad ({len(semantic_result.discrepancies)} discrepancias): "
+                f"{time.perf_counter() - t0:.2f}s",
+                flush=True,
+            )
+
+    def _visual() -> VisualVerdict | None:
+        if not enable_visual:
+            return None
         t0 = time.perf_counter()
-        classify_discrepancies(semantic_result.discrepancies, ai_provider)
-        print(
-            f"[TIMING] clasificación de severidad ({len(semantic_result.discrepancies)} discrepancias): "
-            f"{time.perf_counter() - t0:.2f}s",
-            flush=True,
-        )
+        verdict = run_visual_analysis(actual_path, expected_path, ai_provider)
+        print(f"[TIMING] análisis visual (total): {time.perf_counter() - t0:.2f}s", flush=True)
+        return verdict
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        severity_future = executor.submit(_clasificar)
+        visual_future = executor.submit(_visual)
+        severity_future.result()
+        visual = visual_future.result()
 
     summary = build_summary(semantic_result.discrepancies)
-
-    if enable_visual:
-        t0 = time.perf_counter()
-        visual = run_visual_analysis(actual_path, expected_path, ai_provider)
-        print(f"[TIMING] análisis visual (total, incluye lo anterior): {time.perf_counter() - t0:.2f}s", flush=True)
-    else:
-        visual = None
 
     print(f"[TIMING] === TOTAL compare_documents: {time.perf_counter() - t_total:.2f}s ===", flush=True)
 
